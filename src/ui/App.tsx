@@ -1,41 +1,101 @@
-import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import React, { useState, useCallback } from "react";
+import { Box, Text, useApp, useInput } from "ink";
 import { Animator } from "./components/Animator.js";
-import { ANIMATION_NAMES } from "../animations/animation-registry.js";
+import { MessageDisplay } from "./components/MessageDisplay.js";
+import { InputPrompt } from "./components/InputPrompt.js";
+import {
+  chat,
+  OllamaConnectionError,
+  OllamaModelNotFoundError,
+} from "../llm/ollama-client.js";
+import type { Message } from "../llm/ollama-client.js";
+import { parseResponse } from "../llm/response-parser.js";
+import { buildSystemPrompt } from "../llm/system-prompt.js";
+import type { Config } from "../config/config.js";
 
-export function App() {
+interface AppProps {
+  config: Config;
+}
+
+export function App({ config }: AppProps) {
+  const { exit } = useApp();
   const [animation, setAnimation] = useState("idle");
-  const [animIndex, setAnimIndex] = useState(0);
+  const [message, setMessage] = useState("Gret is watching you...");
+  const [isThinking, setIsThinking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<Message[]>([
+    { role: "system", content: buildSystemPrompt() },
+  ]);
 
-  function playAnimation(name: string) {
-    setAnimation(name);
-  }
+  useInput((_input, key) => {
+    if (key.ctrl && _input === "c") {
+      exit();
+    }
+  });
 
   function handleComplete() {
     setAnimation("idle");
   }
 
-  useInput((input, key) => {
-    if (key.rightArrow || input === "n") {
-      const next = (animIndex + 1) % ANIMATION_NAMES.length;
-      setAnimIndex(next);
-      playAnimation(ANIMATION_NAMES[next]!);
-    } else if (key.leftArrow || input === "p") {
-      const prev = (animIndex - 1 + ANIMATION_NAMES.length) % ANIMATION_NAMES.length;
-      setAnimIndex(prev);
-      playAnimation(ANIMATION_NAMES[prev]!);
-    } else if (input === "q") {
-      process.exit(0);
-    }
-  });
+  const handleInput = useCallback(
+    async (input: string) => {
+      if (input === "exit" || input === "quit") {
+        exit();
+        return;
+      }
+
+      setError(null);
+      setIsThinking(true);
+      setAnimation("thinking");
+      setMessage("");
+
+      const newHistory: Message[] = [
+        ...history,
+        { role: "user", content: input },
+      ];
+
+      try {
+        const raw = await chat(config, newHistory);
+        const response = parseResponse(raw);
+
+        setHistory([...newHistory, { role: "assistant", content: raw }]);
+        setIsThinking(false);
+        setAnimation(response.animation);
+        setMessage(response.text);
+      } catch (err) {
+        setIsThinking(false);
+        setAnimation("scared");
+
+        if (err instanceof OllamaModelNotFoundError) {
+          setError(
+            `🐱 The model '${err.model}' isn't installed.\n\nTo install it:\n  ollama pull ${err.model}\n\nOr use a different model:\n  gret --model llama2`
+          );
+        } else if (err instanceof OllamaConnectionError) {
+          setError(
+            `🐱 Gret can't reach Ollama!\n\nMake sure Ollama is running:\n  ollama serve\n\nOr configure a different host:\n  gret --host <host> --port <port>\n\nInstall Ollama: https://ollama.ai`
+          );
+        } else {
+          setError(`Error: ${String(err)}`);
+        }
+      }
+    },
+    [history, config, exit]
+  );
 
   return (
     <Box flexDirection="column" padding={1}>
       <Animator animation={animation} onComplete={handleComplete} />
-      <Text> </Text>
-      <Text dimColor>
-        [{animation}] — n/→ next · p/← prev · q quit
-      </Text>
+      {error ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text color="red">{error}</Text>
+        </Box>
+      ) : (
+        <MessageDisplay text={message} />
+      )}
+      <InputPrompt onSubmit={handleInput} disabled={isThinking} />
+      <Box marginTop={1}>
+        <Text dimColor>model: {config.model} · exit/quit or Ctrl+C to leave</Text>
+      </Box>
     </Box>
   );
 }
